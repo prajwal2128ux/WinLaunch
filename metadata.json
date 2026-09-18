@@ -1,0 +1,6 @@
+{
+  "name": "WinLaunch - Windows Website Launcher",
+  "description": "Modern Windows desktop launcher and bookmark manager to save, organize, and launch websites in Google Chrome with local SQLite storage, custom backgrounds, and cross-device account synchronization.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,36 @@
+{
+  "appId": "com.winlaunch.app",
+  "productName": "WinLaunch",
+  "copyright": "Copyright © 2026 WinLaunch",
+  "directories": {
+    "output": "dist_electron",
+    "buildResources": "build"
+  },
+  "files": [
+    "dist/**/*",
+    "electron/**/*",
+    "package.json"
+  ],
+  "win": {
+    "target": [
+      {
+        "target": "nsis",
+        "arch": ["x64", "arm64"]
+      }
+    ],
+    "icon": "public/icon.ico",
+    "artifactName": "${productName}-Setup-${version}.${ext}"
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": "always",
+    "createStartMenuShortcut": true,
+    "shortcutName": "WinLaunch",
+    "installerIcon": "public/icon.ico",
+    "uninstallerIcon": "public/icon.ico",
+    "installerHeaderIcon": "public/icon.ico",
+    "perMachine": false,
+    "runAfterFinish": true
+  }
+}
