@@ -1,4 +1,5 @@
 import { UserProfile, CloudSyncData, Website, Category, AppSettings } from '../types';
+import { buildApiUrl } from './apiConfig';
 
 const TOKEN_KEY = 'winlaunch_auth_token';
 const USER_KEY = 'winlaunch_user_profile';
@@ -120,7 +121,7 @@ class AuthService {
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 5000);
-      const res = await fetch('/api/auth/me', {
+      const res = await fetch(buildApiUrl('/api/auth/me'), {
         signal: controller.signal,
         headers: {
           'Authorization': `Bearer ${this.token}`
@@ -171,7 +172,7 @@ class AuthService {
     rememberMe = true
   ): Promise<{ success: boolean; user?: UserProfile; syncData?: CloudSyncData; error?: string }> {
     try {
-      const res = await fetch('/api/auth/register', {
+      const res = await fetch(buildApiUrl('/api/auth/register'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -219,7 +220,7 @@ class AuthService {
     rememberMe = true
   ): Promise<{ success: boolean; user?: UserProfile; syncData?: CloudSyncData; error?: string }> {
     try {
-      const res = await fetch('/api/auth/login', {
+      const res = await fetch(buildApiUrl('/api/auth/login'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password })
@@ -256,7 +257,7 @@ class AuthService {
   public async logout(): Promise<void> {
     if (this.token) {
       try {
-        await fetch('/api/auth/logout', {
+        await fetch(buildApiUrl('/api/auth/logout'), {
           method: 'POST',
           headers: { 'Authorization': `Bearer ${this.token}` }
         });
@@ -277,7 +278,7 @@ class AuthService {
     }
 
     try {
-      const res = await fetch('/api/sync/pull', {
+      const res = await fetch(buildApiUrl('/api/sync/pull'), {
         headers: { 'Authorization': `Bearer ${this.token}` }
       });
 
@@ -311,7 +312,7 @@ class AuthService {
 
     this.isSyncing = true;
     try {
-      const res = await fetch('/api/sync/push', {
+      const res = await fetch(buildApiUrl('/api/sync/push'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

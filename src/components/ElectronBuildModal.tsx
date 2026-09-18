@@ -61,7 +61,8 @@ Features of the generated installer:
 * NSIS Installer with standard Windows setup wizard
 * Start Menu shortcut ("WinLaunch")
 * Desktop shortcut (optional / enabled by default)
-* Stores database in %APPDATA%\\WinLaunch\\websites.db so data is preserved across updates
+* Embedded Production Backend auto-starts and stops with the app
+* Stores user sessions, SQLite database, and cloud accounts in %APPDATA%\\WinLaunch\\
 * Secure Electron with contextIsolation: true and nodeIntegration: false`,
 
     main: `/**
@@ -72,8 +73,11 @@ const { app, BrowserWindow, ipcMain, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawn, execSync } = require('child_process');
+const serverModule = require('./server.cjs');
 
 let mainWindow = null;
+let activeServerUrl = 'http://127.0.0.1:3000';
+let isInternalServerStarted = false;
 
 // Ensure single instance on Windows
 if (!app.requestSingleInstanceLock()) {
@@ -128,12 +132,20 @@ function createWindow() {
     }
   });
 
-  if (app.isPackaged || process.env.NODE_ENV === 'production') {
-    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
+  if (process.env.VITE_DEV_SERVER_URL) {
+    mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
+  } else if (activeServerUrl) {
+    mainWindow.loadURL(activeServerUrl).catch(() => {
+      mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
+    });
   } else {
-    mainWindow.loadURL('http://localhost:3000');
+    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
   }
 }
+
+ipcMain.on('get-api-url-sync', (event) => {
+  event.returnValue = activeServerUrl || 'http://127.0.0.1:3000';
+});
 
 ipcMain.handle('detect-chrome', () => {
   const chromePath = findChromeExecutable();
@@ -152,7 +164,26 @@ ipcMain.handle('open-url', async (event, { url, preferredBrowser = 'chrome' }) =
   return { success: true, browser: 'Default Browser' };
 });
 
-app.whenReady().then(createWindow);`,
+app.whenReady().then(async () => {
+  const appDataDir = getAppDataDir();
+  const dataDir = path.join(appDataDir, 'data');
+  const distPath = path.join(__dirname, '../dist');
+
+  const running = await serverModule.isServerHealthy('http://127.0.0.1:3000');
+  if (!running) {
+    const res = await serverModule.startServer({ port: 3000, dataDir, distPath });
+    activeServerUrl = res.url;
+    isInternalServerStarted = true;
+  }
+
+  createWindow();
+});
+
+app.on('will-quit', () => {
+  if (isInternalServerStarted && serverModule) {
+    serverModule.stopServer();
+  }
+});`,
 
     preload: `/**
  * WinLaunch - Windows Website Launcher
@@ -160,9 +191,16 @@ app.whenReady().then(createWindow);`,
  */
 const { contextBridge, ipcRenderer } = require('electron');
 
+let apiUrl = 'http://127.0.0.1:3000';
+try {
+  apiUrl = ipcRenderer.sendSync('get-api-url-sync') || apiUrl;
+} catch {}
+
 contextBridge.exposeInMainWorld('electronAPI', {
   isElectron: true,
   platform: process.platform,
+  apiUrl: apiUrl,
+  getServerInfo: () => ipcRenderer.invoke('get-server-info'),
 
   // Window Controls
   minimizeWindow: () => ipcRenderer.send('window-minimize'),
@@ -202,9 +240,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "tsx server.ts",
-    "build": "vite build",
+    "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "electron:dev": "electron .",
-    "electron:build": "vite build && electron-builder --win"
+    "electron:build": "npm run build && electron-builder --win"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
   },
   "devDependencies": {
     "electron": "^33.0.0",

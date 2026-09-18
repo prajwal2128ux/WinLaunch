@@ -1,3 +1,5 @@
+import { buildApiUrl } from './apiConfig';
+
 export interface ScrapedMetadata {
   url: string;
   title: string;
@@ -29,7 +31,7 @@ export async function fetchWebsiteMetadata(rawUrl: string): Promise<ScrapedMetad
   const fallbackTitle = cleanDomain.charAt(0).toUpperCase() + cleanDomain.slice(1);
 
   try {
-    const response = await fetch(`/api/metadata?url=${encodeURIComponent(url)}`, {
+    const response = await fetch(buildApiUrl(`/api/metadata?url=${encodeURIComponent(url)}`), {
       headers: { Accept: 'application/json' }
     });
 

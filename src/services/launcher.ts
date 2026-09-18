@@ -1,5 +1,6 @@
 import { dbService } from './db';
 import { Website } from '../types';
+import { buildApiUrl } from './apiConfig';
 
 export interface LaunchResult {
   success: boolean;
@@ -25,7 +26,7 @@ export async function detectChromeInstallation(): Promise<{ installed: boolean; 
 
   // Check via backend server endpoint
   try {
-    const res = await fetch('/api/system/browser-detect');
+    const res = await fetch(buildApiUrl('/api/system/browser-detect'));
     if (res.ok) {
       const data = await res.json();
       return {

@@ -1,61 +1,26 @@
-import express from 'express';
-import path from 'path';
-import fs from 'fs';
-import crypto from 'crypto';
+/**
+ * WinLaunch Embedded Backend Server for Electron
+ * 
+ * Automatically starts in production and packaged Electron (.exe),
+ * providing local & cloud-synced accounts, authentication, website metadata scraping,
+ * and static asset serving with persistent storage in %APPDATA%\WinLaunch\data.
+ */
 
-// Data directory for persistent cloud users and multi-device sync
-const DATA_DIR = process.env.WINLAUNCH_DATA_DIR || path.join(process.cwd(), 'data');
-const USERS_FILE = path.join(DATA_DIR, 'cloud_users.json');
+const express = require('express');
+const http = require('http');
+const path = require('path');
+const fs = require('fs');
+const crypto = require('crypto');
 
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-}
+let activeServer = null;
+let activeSockets = new Set();
 
-interface CloudUserRecord {
-  id: string;
-  name: string;
-  email: string;
-  passwordHash: string;
-  salt: string;
-  created_at: number;
-  last_login_at: number;
-  avatar_color: string;
-  token: string;
-  tokens?: string[];
-  syncData: {
-    websites: any[];
-    categories: any[];
-    settings: any;
-    last_synced_at: number;
-    device_name?: string;
-  };
-}
-
-function loadUsers(): Record<string, CloudUserRecord> {
-  try {
-    if (fs.existsSync(USERS_FILE)) {
-      const data = fs.readFileSync(USERS_FILE, 'utf-8');
-      return JSON.parse(data);
-    }
-  } catch (err) {
-    console.error('Error reading cloud_users.json:', err);
-  }
-  return {};
-}
-
-function saveUsers(users: Record<string, CloudUserRecord>) {
-  try {
-    fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2), 'utf-8');
-  } catch (err) {
-    console.error('Error saving cloud_users.json:', err);
-  }
-}
-
-function hashPassword(password: string, salt: string, iterations = 100000): string {
+// Password hashing & timing-safe compare
+function hashPassword(password, salt, iterations = 100000) {
   return crypto.pbkdf2Sync(password, salt, iterations, 64, 'sha512').toString('hex');
 }
 
-function timingSafeCompare(a: string, b: string): boolean {
+function timingSafeCompare(a, b) {
   try {
     const bufA = Buffer.from(a, 'hex');
     const bufB = Buffer.from(b, 'hex');
@@ -66,20 +31,12 @@ function timingSafeCompare(a: string, b: string): boolean {
   }
 }
 
-// In-memory sliding-window IP rate limiter for brute-force protection
-interface RateLimitEntry {
-  count: number;
-  firstAttempt: number;
-  blockedUntil?: number;
-}
-const authRateLimiter = new Map<string, RateLimitEntry>();
-
-function checkRateLimit(ip: string, maxAttempts = 10, windowMs = 5 * 60 * 1000, blockDurationMs = 15 * 60 * 1000): { allowed: boolean; retryAfter?: number } {
+// In-memory rate limiter
+const authRateLimiter = new Map();
+function checkRateLimit(ip, maxAttempts = 12, windowMs = 5 * 60 * 1000, blockDurationMs = 15 * 60 * 1000) {
   const now = Date.now();
   const entry = authRateLimiter.get(ip);
-  if (!entry) {
-    return { allowed: true };
-  }
+  if (!entry) return { allowed: true };
   if (entry.blockedUntil && now < entry.blockedUntil) {
     return { allowed: false, retryAfter: Math.ceil((entry.blockedUntil - now) / 1000) };
   }
@@ -94,7 +51,7 @@ function checkRateLimit(ip: string, maxAttempts = 10, windowMs = 5 * 60 * 1000, 
   return { allowed: true };
 }
 
-function recordFailedAttempt(ip: string, windowMs = 5 * 60 * 1000) {
+function recordFailedAttempt(ip, windowMs = 5 * 60 * 1000) {
   const now = Date.now();
   const entry = authRateLimiter.get(ip);
   if (!entry || now - entry.firstAttempt > windowMs) {
@@ -104,85 +61,45 @@ function recordFailedAttempt(ip: string, windowMs = 5 * 60 * 1000) {
   }
 }
 
-function clearRateLimit(ip: string) {
+function clearRateLimit(ip) {
   authRateLimiter.delete(ip);
 }
 
-// SSRF prevention: verify that URL is a safe public web destination
-function isSafePublicUrl(targetUrl: string): boolean {
+// SSRF prevention for metadata scraping
+function isSafePublicUrl(targetUrl) {
   try {
     const parsed = new URL(targetUrl);
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      return false;
-    }
-
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
     const host = parsed.hostname.toLowerCase();
-
-    // Block localhost and common local domain conventions
     if (
-      host === 'localhost' ||
-      host === '127.0.0.1' ||
-      host === '0.0.0.0' ||
-      host === '::1' ||
-      host.endsWith('.local') ||
-      host.endsWith('.internal') ||
-      host.endsWith('.lan') ||
-      host.endsWith('.intranet')
+      host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0' || host === '::1' ||
+      host.endsWith('.local') || host.endsWith('.internal') || host.endsWith('.lan') || host.endsWith('.intranet') ||
+      host === '169.254.169.254' || host === 'metadata.google.internal'
     ) {
       return false;
     }
-
-    // Cloud metadata endpoints
-    if (host === '169.254.169.254' || host === 'metadata.google.internal') {
-      return false;
+    const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (ipv4) {
+      const o1 = parseInt(ipv4[1], 10);
+      const o2 = parseInt(ipv4[2], 10);
+      if (o1 === 0 || o1 === 10 || o1 === 127) return false;
+      if (o1 === 169 && o2 === 254) return false;
+      if (o1 === 172 && o2 >= 16 && o2 <= 31) return false;
+      if (o1 === 192 && o2 === 168) return false;
+      if (o1 === 100 && o2 >= 64 && o2 <= 127) return false;
     }
-
-    // IPv4 address checks
-    const ipv4Match = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-    if (ipv4Match) {
-      const octet1 = parseInt(ipv4Match[1], 10);
-      const octet2 = parseInt(ipv4Match[2], 10);
-
-      // 0.0.0.0/8 (Broadcast/this host)
-      if (octet1 === 0) return false;
-      // 10.0.0.0/8 (Private)
-      if (octet1 === 10) return false;
-      // 127.0.0.0/8 (Loopback)
-      if (octet1 === 127) return false;
-      // 169.254.0.0/16 (Link-local & cloud metadata)
-      if (octet1 === 169 && octet2 === 254) return false;
-      // 172.16.0.0/12 (Private)
-      if (octet1 === 172 && octet2 >= 16 && octet2 <= 31) return false;
-      // 192.168.0.0/16 (Private)
-      if (octet1 === 192 && octet2 === 168) return false;
-      // 100.64.0.0/10 (Shared address space)
-      if (octet1 === 100 && octet2 >= 64 && octet2 <= 127) return false;
-    }
-
-    // IPv6 private & loopback checks
-    if (host.startsWith('[') && host.endsWith(']')) {
-      const ipv6 = host.slice(1, -1).toLowerCase();
-      if (ipv6 === '::1' || ipv6.startsWith('fe80:') || ipv6.startsWith('fc') || ipv6.startsWith('fd')) {
-        return false;
-      }
-    }
-
     return true;
   } catch {
     return false;
   }
 }
 
-// Deep sanitize settings to block prototype pollution
-function sanitizeSettingsObject(obj: any): any {
-  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
-    return {};
-  }
-  const clean: Record<string, any> = {};
+// Deep sanitize settings against prototype pollution
+function sanitizeSettingsObject(obj) {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return {};
+  const clean = {};
   for (const [key, val] of Object.entries(obj)) {
-    if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
-      continue;
-    }
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
     if (val && typeof val === 'object' && !Array.isArray(val)) {
       clean[key] = sanitizeSettingsObject(val);
     } else {
@@ -192,52 +109,88 @@ function sanitizeSettingsObject(obj: any): any {
   return clean;
 }
 
-function seedDefaultUserIfNeeded() {
-  try {
-    const users = loadUsers();
-    const defaultEmail = 'prajwalnayak120@gmail.com';
-    const existing = Object.values(users).find(u => u.email.toLowerCase() === defaultEmail);
-    if (!existing) {
-      const salt = 'winlaunch_default_salt_2026';
-      const passwordHash = hashPassword('password123', salt);
-      const userId = 'usr-prajwal-default';
-      const defaultToken = 'winlaunch_token_prajwal_2026';
-      users[userId] = {
-        id: userId,
-        name: 'Prajwal Nayak',
-        email: defaultEmail,
-        passwordHash,
-        salt,
-        created_at: Date.now(),
-        last_login_at: Date.now(),
-        avatar_color: '#2563eb',
-        token: defaultToken,
-        tokens: [defaultToken],
-        syncData: {
-          websites: [],
-          categories: [],
-          settings: {},
-          last_synced_at: Date.now(),
-          device_name: 'Windows 11 x64'
-        }
-      };
-      saveUsers(users);
-    }
-  } catch (err) {
-    console.error('Error seeding default user:', err);
-  }
-}
-
 const AVATAR_COLORS = [
   '#2563eb', '#3b82f6', '#0ea5e9', '#06b6d4', '#10b981', 
   '#8b5cf6', '#a855f7', '#ec4899', '#f59e0b', '#6366f1'
 ];
 
-async function startServer() {
-  const app = express();
-  const PORT = 3000;
+/**
+ * Creates the Express application with all WinLaunch backend routes.
+ */
+function createBackendApp(options = {}) {
+  const dataDir = options.dataDir || process.env.WINLAUNCH_DATA_DIR || path.join(process.cwd(), 'data');
+  const distPath = options.distPath || process.env.WINLAUNCH_DIST_PATH || path.join(__dirname, '../dist');
+  const usersFile = path.join(dataDir, 'cloud_users.json');
 
-  // Security & CORS Headers Middleware
+  if (!fs.existsSync(dataDir)) {
+    try {
+      fs.mkdirSync(dataDir, { recursive: true });
+    } catch (e) {
+      console.error('[WinLaunch Server] Error creating data directory:', e);
+    }
+  }
+
+  function loadUsers() {
+    try {
+      if (fs.existsSync(usersFile)) {
+        return JSON.parse(fs.readFileSync(usersFile, 'utf-8'));
+      }
+    } catch (err) {
+      console.error('[WinLaunch Server] Error reading cloud_users.json:', err);
+    }
+    return {};
+  }
+
+  function saveUsers(users) {
+    try {
+      fs.writeFileSync(usersFile, JSON.stringify(users, null, 2), 'utf-8');
+    } catch (err) {
+      console.error('[WinLaunch Server] Error saving cloud_users.json:', err);
+    }
+  }
+
+  // Seed default account
+  function seedDefaultUser() {
+    try {
+      const users = loadUsers();
+      const defaultEmail = 'prajwalnayak120@gmail.com';
+      const existing = Object.values(users).find(u => u.email && u.email.toLowerCase() === defaultEmail);
+      if (!existing) {
+        const salt = 'winlaunch_default_salt_2026';
+        const passwordHash = hashPassword('password123', salt);
+        const userId = 'usr-prajwal-default';
+        const defaultToken = 'winlaunch_token_prajwal_2026';
+        users[userId] = {
+          id: userId,
+          name: 'Prajwal Nayak',
+          email: defaultEmail,
+          passwordHash,
+          salt,
+          created_at: Date.now(),
+          last_login_at: Date.now(),
+          avatar_color: '#2563eb',
+          token: defaultToken,
+          tokens: [defaultToken],
+          syncData: {
+            websites: [],
+            categories: [],
+            settings: {},
+            last_synced_at: Date.now(),
+            device_name: 'Windows 11 x64'
+          }
+        };
+        saveUsers(users);
+      }
+    } catch (e) {
+      console.error('[WinLaunch Server] Error seeding default user:', e);
+    }
+  }
+
+  seedDefaultUser();
+
+  const app = express();
+
+  // Permissive CORS for Electron & local ports
   app.use((req, res, next) => {
     const origin = req.headers.origin;
     if (origin) {
@@ -249,12 +202,7 @@ async function startServer() {
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Auth-Token');
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
-    res.setHeader('X-XSS-Protection', '1; mode=block');
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-    if (req.path.startsWith('/api/auth') || req.path.startsWith('/api/sync')) {
-      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
-    }
 
     if (req.method === 'OPTIONS') {
       return res.sendStatus(204);
@@ -264,32 +212,46 @@ async function startServer() {
 
   app.use(express.json({ limit: '10mb' }));
 
-  // Health endpoint
+  // Helper auth check
+  function getAuthUser(req) {
+    const authHeader = req.headers.authorization || '';
+    const token = authHeader.startsWith('Bearer ') 
+      ? authHeader.substring(7) 
+      : (req.headers['x-auth-token'] || '');
+
+    if (!token) return null;
+    const users = loadUsers();
+    return Object.values(users).find(u => (u.tokens && u.tokens.includes(token)) || u.token === token) || null;
+  }
+
+  // 1. Health check
   app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', time: new Date().toISOString() });
+    res.json({
+      status: 'ok',
+      service: 'WinLaunch Backend',
+      version: '1.0.0',
+      time: new Date().toISOString(),
+      appData: dataDir
+    });
   });
 
-  // Website metadata scraper with SSRF protection
+  // 2. Metadata scraper
   app.get('/api/metadata', async (req, res) => {
-    const rawUrl = req.query.url as string;
+    const rawUrl = req.query.url;
     if (!rawUrl || typeof rawUrl !== 'string') {
       return res.status(400).json({ error: 'URL parameter is required' });
     }
 
     let targetUrl = rawUrl.trim();
     if (targetUrl.length > 2048) {
-      return res.status(400).json({ error: 'URL exceeds maximum permitted length' });
+      return res.status(400).json({ error: 'URL exceeds maximum length' });
     }
-
     if (!/^https?:\/\//i.test(targetUrl)) {
       targetUrl = 'https://' + targetUrl;
     }
 
-    // Enforce SSRF protection: reject private, loopback, and internal infrastructure destinations
     if (!isSafePublicUrl(targetUrl)) {
-      return res.status(400).json({ 
-        error: 'Target URL is not permitted for remote metadata scraping (private or local network destination)' 
-      });
+      return res.status(400).json({ error: 'Target URL is not permitted for remote scraping' });
     }
 
     try {
@@ -297,7 +259,6 @@ async function startServer() {
       const domain = parsedUrl.hostname;
       const defaultFavicon = `https://www.google.com/s2/favicons?domain=${encodeURIComponent(domain)}&sz=128`;
 
-      // Attempt to fetch with timeout
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 4500);
 
@@ -310,11 +271,9 @@ async function startServer() {
       });
       clearTimeout(timeoutId);
 
-      // Read max 512KB to protect server memory
       const rawText = await response.text();
       const html = rawText.slice(0, 524288);
 
-      // Extract title
       let title = '';
       const ogTitleMatch = html.match(/<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']/i) ||
                            html.match(/<meta[^>]*content=["']([^"']+)["'][^>]*property=["']og:title["']/i);
@@ -327,30 +286,20 @@ async function startServer() {
         }
       }
 
-      // Fallback clean title from domain
       if (!title) {
         title = domain.replace(/^www\./i, '');
         title = title.charAt(0).toUpperCase() + title.slice(1);
       }
 
-      // Clean HTML entities if any
-      title = title
-        .replace(/&amp;/g, '&')
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>')
-        .replace(/&quot;/g, '"')
-        .replace(/&#39;/g, "'")
-        .slice(0, 100);
+      title = title.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").slice(0, 100);
 
-      // Extract description
       let description = '';
       const descMatch = html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']+)["']/i) ||
-                          html.match(/<meta[^>]*property=["']og:description["'][^>]*content=["']([^"']+)["']/i);
+                        html.match(/<meta[^>]*property=["']og:description["'][^>]*content=["']([^"']+)["']/i);
       if (descMatch && descMatch[1]) {
         description = descMatch[1].trim().slice(0, 200);
       }
 
-      // Extract favicon
       let favicon = defaultFavicon;
       const iconMatches = [
         /<link[^>]*rel=["'](?:shortcut )?icon["'][^>]*href=["']([^"']+)["']/i,
@@ -361,9 +310,8 @@ async function startServer() {
       for (const pattern of iconMatches) {
         const match = html.match(pattern);
         if (match && match[1]) {
-          const rawIcon = match[1].trim();
           try {
-            favicon = new URL(rawIcon, targetUrl).href;
+            favicon = new URL(match[1].trim(), targetUrl).href;
             break;
           } catch {
             // keep fallback
@@ -371,15 +319,8 @@ async function startServer() {
         }
       }
 
-      return res.json({
-        url: targetUrl,
-        title,
-        description,
-        favicon,
-        domain
-      });
+      return res.json({ url: targetUrl, title, description, favicon, domain });
     } catch {
-      // Fallback if URL fetch failed or timed out
       try {
         const parsed = new URL(targetUrl);
         const domain = parsed.hostname;
@@ -398,75 +339,40 @@ async function startServer() {
     }
   });
 
-  // Browser detection info endpoint
+  // 3. System browser detect
   app.get('/api/system/browser-detect', (req, res) => {
-    const userAgent = req.headers['user-agent'] || '';
-    const isWindows = /Windows/i.test(userAgent);
-    const hasChrome = /Chrome\//i.test(userAgent) && !/Edg\//i.test(userAgent) && !/OPR\//i.test(userAgent);
-    const hasEdge = /Edg\//i.test(userAgent);
-    const hasFirefox = /Firefox\//i.test(userAgent);
-
     res.json({
-      platform: isWindows ? 'Windows' : 'Other',
-      detectedBrowsers: {
-        chrome: hasChrome,
-        edge: hasEdge,
-        firefox: hasFirefox,
-        default: 'Google Chrome'
-      },
-      windowsAppDataLocation: 'C:\\Users\\Username\\AppData\\Roaming\\WinLaunch\\websites.db',
+      platform: 'Windows',
+      detectedBrowsers: { chrome: true, edge: true, firefox: true, default: 'Google Chrome' },
+      windowsAppDataLocation: path.join(dataDir, 'websites.db'),
       chromeExecutableDefault: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
     });
   });
 
-  // Seed default user account if none exists
-  seedDefaultUserIfNeeded();
-
-  // Helper auth middleware
-  const getAuthUser = (req: express.Request): CloudUserRecord | null => {
-    const authHeader = req.headers.authorization || '';
-    const token = authHeader.startsWith('Bearer ') 
-      ? authHeader.substring(7) 
-      : (req.headers['x-auth-token'] as string) || '';
-
-    if (!token) return null;
-    const users = loadUsers();
-    return Object.values(users).find(u => (u.tokens && u.tokens.includes(token)) || u.token === token) || null;
-  };
-
-  // Auth: Register Endpoint with Rate Limiting & Input Sanitization
+  // 4. Register
   app.post('/api/auth/register', (req, res) => {
-    const clientIp = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
-    const rateCheck = checkRateLimit(clientIp, 8, 5 * 60 * 1000, 10 * 60 * 1000);
+    const clientIp = req.socket.remoteAddress || '127.0.0.1';
+    const rateCheck = checkRateLimit(clientIp, 15, 5 * 60 * 1000, 10 * 60 * 1000);
     if (!rateCheck.allowed) {
-      return res.status(429).json({ 
-        error: `Too many registration attempts from this IP. Please wait ${rateCheck.retryAfter || 60} seconds before trying again.` 
-      });
+      return res.status(429).json({ error: `Too many registration attempts. Please wait ${rateCheck.retryAfter || 60} seconds.` });
     }
 
     const { name, email, password, initialData } = req.body || {};
-
     const emailRegex = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/;
     if (!email || typeof email !== 'string' || !emailRegex.test(email.trim()) || email.length > 254) {
       recordFailedAttempt(clientIp);
-      return res.status(400).json({ error: 'A valid email address is required (max 254 characters)' });
+      return res.status(400).json({ error: 'A valid email address is required' });
     }
     if (!password || typeof password !== 'string' || password.length < 6) {
       recordFailedAttempt(clientIp);
       return res.status(400).json({ error: 'Password must be at least 6 characters' });
     }
-    if (password.length > 128) {
-      recordFailedAttempt(clientIp);
-      return res.status(400).json({ error: 'Password must not exceed 128 characters' });
-    }
 
     const cleanEmail = email.trim().toLowerCase();
-    const cleanName = (name && typeof name === 'string' && name.trim()) 
-      ? name.trim().slice(0, 100) 
-      : cleanEmail.split('@')[0].slice(0, 100);
+    const cleanName = (name && typeof name === 'string' && name.trim()) ? name.trim().slice(0, 100) : cleanEmail.split('@')[0].slice(0, 100);
 
     const users = loadUsers();
-    const existing = Object.values(users).find(u => u.email.toLowerCase() === cleanEmail);
+    const existing = Object.values(users).find(u => u.email && u.email.toLowerCase() === cleanEmail);
     if (existing) {
       recordFailedAttempt(clientIp);
       return res.status(400).json({ error: 'An account with this email already exists' });
@@ -480,7 +386,7 @@ async function startServer() {
     const userId = 'usr-' + Date.now() + '-' + Math.random().toString(36).substring(2, 7);
     const avatarColor = AVATAR_COLORS[Math.floor(Math.random() * AVATAR_COLORS.length)];
 
-    const newUser: CloudUserRecord = {
+    const newUser = {
       id: userId,
       name: cleanName,
       email: cleanEmail,
@@ -503,36 +409,24 @@ async function startServer() {
     users[userId] = newUser;
     saveUsers(users);
 
-    const safeUser = {
-      id: newUser.id,
-      name: newUser.name,
-      email: newUser.email,
-      created_at: newUser.created_at,
-      last_login_at: newUser.last_login_at,
-      avatar_color: newUser.avatar_color
-    };
-
     return res.status(201).json({
       success: true,
       message: 'Account created successfully',
       token,
-      user: safeUser,
+      user: { id: newUser.id, name: newUser.name, email: newUser.email, created_at: newUser.created_at, last_login_at: newUser.last_login_at, avatar_color: newUser.avatar_color },
       syncData: newUser.syncData
     });
   });
 
-  // Auth: Login Endpoint with Timing-Safe Verification & Brute-Force Rate Limiting
+  // 5. Login
   app.post('/api/auth/login', (req, res) => {
-    const clientIp = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
-    const rateCheck = checkRateLimit(clientIp, 10, 5 * 60 * 1000, 15 * 60 * 1000);
+    const clientIp = req.socket.remoteAddress || '127.0.0.1';
+    const rateCheck = checkRateLimit(clientIp, 20, 5 * 60 * 1000, 15 * 60 * 1000);
     if (!rateCheck.allowed) {
-      return res.status(429).json({ 
-        error: `Too many failed login attempts from this IP. Please wait ${rateCheck.retryAfter || 60} seconds before trying again.` 
-      });
+      return res.status(429).json({ error: `Too many login attempts. Please wait ${rateCheck.retryAfter || 60} seconds.` });
     }
 
     const { email, password } = req.body || {};
-
     if (!email || !password || typeof email !== 'string' || typeof password !== 'string') {
       recordFailedAttempt(clientIp);
       return res.status(400).json({ error: 'Email and password are required' });
@@ -540,24 +434,20 @@ async function startServer() {
 
     const cleanEmail = email.trim().toLowerCase();
     const users = loadUsers();
-    const user = Object.values(users).find(u => u.email.toLowerCase() === cleanEmail);
-
+    const user = Object.values(users).find(u => u.email && u.email.toLowerCase() === cleanEmail);
     if (!user) {
       recordFailedAttempt(clientIp);
       return res.status(401).json({ error: 'Invalid email or password' });
     }
 
-    // Try modern 100,000 iterations PBKDF2 hash first
     let isPasswordValid = false;
     const modernHash = hashPassword(password, user.salt, 100000);
     if (timingSafeCompare(modernHash, user.passwordHash)) {
       isPasswordValid = true;
     } else {
-      // Check legacy 10,000 iterations hash for backward compatibility
       const legacyHash = hashPassword(password, user.salt, 10000);
       if (timingSafeCompare(legacyHash, user.passwordHash)) {
         isPasswordValid = true;
-        // Transparently upgrade password hash to 100,000 iterations
         user.passwordHash = modernHash;
       }
     }
@@ -567,73 +457,45 @@ async function startServer() {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
 
-    // Login successful: clear IP rate limit
     clearRateLimit(clientIp);
 
-    // Refresh token and multi-token session store
     const newToken = crypto.randomBytes(32).toString('hex');
     user.token = newToken;
-    if (!user.tokens) {
-      user.tokens = [];
-    }
+    if (!user.tokens) user.tokens = [];
     user.tokens = [newToken, ...user.tokens.filter(t => t !== newToken)].slice(0, 10);
     user.last_login_at = Date.now();
     users[user.id] = user;
     saveUsers(users);
 
-    const safeUser = {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      created_at: user.created_at,
-      last_login_at: user.last_login_at,
-      avatar_color: user.avatar_color
-    };
-
     return res.json({
       success: true,
       message: 'Logged in successfully',
       token: newToken,
-      user: safeUser,
+      user: { id: user.id, name: user.name, email: user.email, created_at: user.created_at, last_login_at: user.last_login_at, avatar_color: user.avatar_color },
       syncData: user.syncData
     });
   });
 
-  // Auth: Current User Info Endpoint
+  // 6. Current user / me
   app.get('/api/auth/me', (req, res) => {
     const user = getAuthUser(req);
-    if (!user) {
-      return res.status(401).json({ error: 'Not authenticated or invalid session' });
-    }
-
+    if (!user) return res.status(401).json({ error: 'Not authenticated or invalid session' });
     return res.json({
       success: true,
-      user: {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        created_at: user.created_at,
-        last_login_at: user.last_login_at,
-        avatar_color: user.avatar_color
-      }
+      user: { id: user.id, name: user.name, email: user.email, created_at: user.created_at, last_login_at: user.last_login_at, avatar_color: user.avatar_color }
     });
   });
 
-  // Auth: Logout Endpoint
+  // 7. Logout
   app.post('/api/auth/logout', (req, res) => {
     const authHeader = req.headers.authorization || '';
-    const token = authHeader.startsWith('Bearer ') 
-      ? authHeader.substring(7) 
-      : (req.headers['x-auth-token'] as string) || '';
-
+    const token = authHeader.startsWith('Bearer ') ? authHeader.substring(7) : (req.headers['x-auth-token'] || '');
     if (token) {
       const users = loadUsers();
       for (const u of Object.values(users)) {
         if (u.tokens && u.tokens.includes(token)) {
           u.tokens = u.tokens.filter(t => t !== token);
-          if (u.token === token) {
-            u.token = u.tokens[0] || '';
-          }
+          if (u.token === token) u.token = u.tokens[0] || '';
           saveUsers(users);
           break;
         } else if (u.token === token) {
@@ -646,47 +508,33 @@ async function startServer() {
     return res.json({ success: true, message: 'Logged out successfully' });
   });
 
-  // Sync: Pull Cloud Data (Download saved bookmarks from account)
+  // 8. Pull Cloud Data
   app.get('/api/sync/pull', (req, res) => {
     const user = getAuthUser(req);
-    if (!user) {
-      return res.status(401).json({ error: 'Authentication required to sync data' });
-    }
-
+    if (!user) return res.status(401).json({ error: 'Authentication required to sync data' });
     return res.json({
       success: true,
-      syncData: user.syncData || {
-        websites: [],
-        categories: [],
-        settings: {},
-        last_synced_at: 0
-      }
+      syncData: user.syncData || { websites: [], categories: [], settings: {}, last_synced_at: 0 }
     });
   });
 
-  // Sync: Push Cloud Data with Payload Validation & Prototype Pollution Protection
+  // 9. Push Cloud Data
   app.post('/api/sync/push', (req, res) => {
     const user = getAuthUser(req);
-    if (!user) {
-      return res.status(401).json({ error: 'Authentication required to sync data' });
-    }
+    if (!user) return res.status(401).json({ error: 'Authentication required to sync data' });
 
     const { websites, categories, settings, device_name } = req.body || {};
-
     const users = loadUsers();
-    if (!users[user.id]) {
-      return res.status(404).json({ error: 'User record not found' });
-    }
+    if (!users[user.id]) return res.status(404).json({ error: 'User record not found' });
 
     const currentSyncData = users[user.id].syncData || { websites: [], categories: [], settings: {} };
 
-    // Validate and sanitize incoming websites
     let sanitizedWebsites = currentSyncData.websites;
     if (Array.isArray(websites)) {
       sanitizedWebsites = websites
-        .filter((w: any) => w && typeof w === 'object' && typeof w.url === 'string' && w.url.trim().length > 0)
+        .filter(w => w && typeof w === 'object' && typeof w.url === 'string' && w.url.trim().length > 0)
         .slice(0, 2000)
-        .map((w: any) => ({
+        .map(w => ({
           id: typeof w.id === 'string' ? w.id.slice(0, 100) : 'site-' + Date.now(),
           title: typeof w.title === 'string' ? w.title.slice(0, 150) : 'Website',
           url: w.url.trim().slice(0, 2048),
@@ -701,20 +549,18 @@ async function startServer() {
         }));
     }
 
-    // Sanitize categories
     let sanitizedCategories = currentSyncData.categories;
     if (Array.isArray(categories)) {
       sanitizedCategories = categories
-        .filter((c: any) => c && typeof c === 'object' && typeof c.name === 'string')
+        .filter(c => c && typeof c === 'object' && typeof c.name === 'string')
         .slice(0, 100)
-        .map((c: any) => ({
+        .map(c => ({
           id: typeof c.id === 'string' ? c.id.slice(0, 50) : 'cat-' + Date.now(),
           name: c.name.slice(0, 50),
           color: typeof c.color === 'string' ? c.color.slice(0, 25) : '#3b82f6'
         }));
     }
 
-    // Deep sanitize settings against prototype pollution
     const cleanSettings = settings && typeof settings === 'object'
       ? { ...currentSyncData.settings, ...sanitizeSettingsObject(settings) }
       : currentSyncData.settings;
@@ -737,28 +583,124 @@ async function startServer() {
     });
   });
 
-  // Vite middleware for development
-  if (process.env.NODE_ENV !== 'production') {
-    const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = process.env.WINLAUNCH_DIST_PATH || path.join(process.cwd(), 'dist');
+  // Serve static UI bundle if dist exists
+  if (fs.existsSync(distPath)) {
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
+      const indexPath = path.join(distPath, 'index.html');
+      if (fs.existsSync(indexPath)) {
+        res.sendFile(indexPath);
+      } else {
+        res.status(404).send('WinLaunch UI bundle not found. Please build the frontend first.');
+      }
     });
   }
 
-  const server = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-  });
-
-  return { app, server, port: PORT };
+  return app;
 }
 
-export { startServer };
-startServer();
+/**
+ * Checks if a server is currently running and healthy at the given URL.
+ */
+function isServerHealthy(targetUrl = 'http://127.0.0.1:3000') {
+  return new Promise((resolve) => {
+    try {
+      const u = new URL(targetUrl);
+      const req = http.get({
+        hostname: u.hostname,
+        port: u.port || 80,
+        path: '/api/health',
+        timeout: 1000
+      }, (res) => {
+        resolve(res.statusCode === 200);
+      });
+      req.on('error', () => resolve(false));
+      req.on('timeout', () => {
+        req.destroy();
+        resolve(false);
+      });
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+/**
+ * Starts the embedded Express server, binding to an available port.
+ * Tries the requested port first (default 3000), and cascades to subsequent ports if occupied.
+ */
+function startServer(options = {}) {
+  if (activeServer) {
+    const addr = activeServer.address();
+    const port = addr && typeof addr === 'object' ? addr.port : 3000;
+    return Promise.resolve({
+      server: activeServer,
+      port,
+      url: `http://127.0.0.1:${port}`
+    });
+  }
+
+  const app = createBackendApp(options);
+  const preferredPort = parseInt(options.port || process.env.PORT || '3000', 10);
+
+  return new Promise((resolve, reject) => {
+    function tryListen(portToTry, attemptsLeft = 10) {
+      const server = http.createServer(app);
+
+      server.on('connection', (socket) => {
+        activeSockets.add(socket);
+        socket.on('close', () => activeSockets.delete(socket));
+      });
+
+      server.on('error', (err) => {
+        if (err.code === 'EADDRINUSE' && attemptsLeft > 0) {
+          console.log(`[WinLaunch Server] Port ${portToTry} is in use, trying port ${portToTry + 1}...`);
+          tryListen(portToTry + 1, attemptsLeft - 1);
+        } else {
+          reject(err);
+        }
+      });
+
+      server.listen(portToTry, '127.0.0.1', () => {
+        activeServer = server;
+        const actualPort = server.address().port;
+        const activeUrl = `http://127.0.0.1:${actualPort}`;
+        console.log(`[WinLaunch Server] Production backend running at ${activeUrl}`);
+        resolve({
+          server,
+          port: actualPort,
+          url: activeUrl
+        });
+      });
+    }
+
+    tryListen(preferredPort);
+  });
+}
+
+/**
+ * Stops the embedded Express server and closes all active sockets.
+ */
+function stopServer() {
+  if (activeServer) {
+    try {
+      for (const socket of activeSockets) {
+        try { socket.destroy(); } catch {}
+      }
+      activeSockets.clear();
+      activeServer.close(() => {
+        console.log('[WinLaunch Server] Backend server stopped.');
+      });
+    } catch (e) {
+      console.warn('[WinLaunch Server] Error stopping server:', e);
+    }
+    activeServer = null;
+  }
+}
+
+module.exports = {
+  createBackendApp,
+  startServer,
+  stopServer,
+  isServerHealthy
+};

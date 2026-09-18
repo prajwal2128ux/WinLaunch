@@ -6,7 +6,9 @@ A modern Windows desktop app to save, organize, and launch websites directly in 
 
 * **Quick Website Launcher**: Save and launch websites directly in **Google Chrome** with fallback to default browser.
 * **Auto-Fetch Metadata**: Automatically grabs the website name, description, and high-resolution favicon from any URL.
-* **Local SQLite Database**: All records are saved in SQLite (`websites.db`) inside `%APPDATA%\WinLaunch\` so data is retained securely across restarts.
+* **Embedded Production Backend**: Automatically starts the local backend server when the app launches and stops it when closed — no manual server or npm commands needed in the installed `.exe`.
+* **Local & Cloud Sync Persistence**: All user accounts, sessions, and bookmarks are saved in `%APPDATA%\WinLaunch\` (SQLite `websites.db` and `cloud_users.json`), preserving data across updates.
+* **Secure Authentication & Sessions**: PBKDF2 with 100,000 iterations, timing-safe validation, and persistent multi-device cloud backup.
 * **Windows 11 UI**: Fluent Design styling, dark/light theme, custom title bar, category color tags, and search.
 * **Favorites & Tracking**: Pin favorite websites and track launch counts and recent activity.
 * **Import & Export**: Backup and restore all bookmarks via JSON.

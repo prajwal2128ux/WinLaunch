@@ -4,9 +4,24 @@
  */
 const { contextBridge, ipcRenderer } = require('electron');
 
+// Obtain active API URL from main process
+let apiUrl = 'http://127.0.0.1:3000';
+try {
+  const resolved = ipcRenderer.sendSync('get-api-url-sync');
+  if (resolved && typeof resolved === 'string') {
+    apiUrl = resolved;
+  }
+} catch (e) {
+  // fallback default
+}
+
 contextBridge.exposeInMainWorld('electronAPI', {
   isElectron: true,
   platform: process.platform,
+  apiUrl: apiUrl,
+
+  // Server Info
+  getServerInfo: () => ipcRenderer.invoke('get-server-info'),
 
   // Window Controls
   minimizeWindow: () => ipcRenderer.send('window-minimize'),

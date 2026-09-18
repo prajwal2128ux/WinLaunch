@@ -60,6 +60,7 @@ export interface AppSettings {
 export interface ElectronAPI {
   isElectron: boolean;
   platform: string;
+  apiUrl?: string;
   minimizeWindow: () => void;
   maximizeWindow: () => void;
   closeWindow: () => void;
@@ -67,6 +68,7 @@ export interface ElectronAPI {
   detectChrome: () => Promise<{ installed: boolean; path: string }>;
   openUrl: (options: { url: string; preferredBrowser?: string }) => Promise<{ success: boolean; browser?: string; path?: string; error?: string }>;
   getAppDataInfo: () => Promise<{ appDataDir: string; dbPath: string; exists: boolean; size: number }>;
+  getServerInfo?: () => Promise<{ url: string; isInternal?: boolean }>;
 }
 
 declare global {
