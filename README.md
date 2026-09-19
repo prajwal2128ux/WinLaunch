@@ -2,6 +2,8 @@
 
 A modern, high-performance Windows desktop application to bookmark, organize, categorize, and launch web applications and websites directly in **Google Chrome** (with automatic fallback to the system default browser).
 
+** one-click Windows .exe setup installer is available in the GitHub Releases section.**
+
 Built with **Electron**, **React 19**, **Tailwind CSS**, an **Embedded Express Backend**, and **Local SQLite / Cloud Sync Persistence**.
 
 ---
