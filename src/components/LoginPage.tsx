@@ -40,8 +40,8 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   
   // Form fields
   const [name, setName] = useState('');
-  const [email, setEmail] = useState('prajwalnayak120@gmail.com');
-  const [password, setPassword] = useState('password123');
+  const [email, setEmail] = useState('demo@winlaunch.local');
+  const [password, setPassword] = useState('demo1234');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [rememberMe, setRememberMe] = useState(true);
@@ -289,12 +289,12 @@ export const LoginPage: React.FC<LoginPageProps> = ({
             }`}>
               <div className="flex items-center space-x-1.5 min-w-0">
                 <Sparkles className="w-3.5 h-3.5 text-blue-400 shrink-0" />
-                <span className="truncate">Instant Access: Prajwal Nayak</span>
+                <span className="truncate">Instant Access: demo@winlaunch.local</span>
               </div>
               <button
-                id="btn-quick-fill-prajwal"
+                id="btn-quick-fill-demo"
                 type="button"
-                onClick={() => handleQuickFill('prajwalnayak120@gmail.com', 'password123')}
+                onClick={() => handleQuickFill('demo@winlaunch.local', 'demo1234')}
                 className={`px-2 py-0.5 rounded font-medium border text-[11px] shrink-0 transition-colors ${
                   isDark 
                     ? 'bg-blue-600/30 hover:bg-blue-600/50 border-blue-500/40 text-blue-200' 
@@ -327,7 +327,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                     type="text"
                     value={name}
                     onChange={(e) => setName(e.target.value)}
-                    placeholder="e.g. Prajwal Nayak"
+                    placeholder="e.g. Alex Mercer"
                     className={`w-full pl-9 pr-3 py-2 rounded-xl text-sm border transition-colors outline-none focus:ring-2 focus:ring-blue-500/50 ${
                       isDark 
                         ? 'bg-slate-950/60 border-slate-750 text-slate-100 placeholder-slate-500' 

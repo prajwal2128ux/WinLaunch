@@ -153,16 +153,16 @@ function createBackendApp(options = {}) {
   function seedDefaultUser() {
     try {
       const users = loadUsers();
-      const defaultEmail = 'prajwalnayak120@gmail.com';
+      const defaultEmail = 'demo@winlaunch.local';
       const existing = Object.values(users).find(u => u.email && u.email.toLowerCase() === defaultEmail);
       if (!existing) {
-        const salt = 'winlaunch_default_salt_2026';
-        const passwordHash = hashPassword('password123', salt);
-        const userId = 'usr-prajwal-default';
-        const defaultToken = 'winlaunch_token_prajwal_2026';
+        const salt = 'winlaunch_demo_salt_2026';
+        const passwordHash = hashPassword('demo1234', salt);
+        const userId = 'usr-demo-default';
+        const defaultToken = 'winlaunch_token_demo_2026';
         users[userId] = {
           id: userId,
-          name: 'Prajwal Nayak',
+          name: 'Demo User',
           email: defaultEmail,
           passwordHash,
           salt,
@@ -581,6 +581,24 @@ function createBackendApp(options = {}) {
       last_synced_at: users[user.id].syncData.last_synced_at,
       websitesCount: users[user.id].syncData.websites.length
     });
+  });
+
+  // Explicit route for SQLite WebAssembly binary with application/wasm MIME
+  app.get('/sql-wasm.wasm', (_req, res) => {
+    const candidatePaths = [
+      path.join(distPath, 'sql-wasm.wasm'),
+      path.join(process.cwd(), 'dist', 'sql-wasm.wasm'),
+      path.join(process.cwd(), 'public', 'sql-wasm.wasm'),
+      path.join(process.cwd(), 'node_modules', 'sql.js', 'dist', 'sql-wasm.wasm')
+    ];
+    for (const p of candidatePaths) {
+      if (fs.existsSync(p)) {
+        res.setHeader('Content-Type', 'application/wasm');
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        return res.sendFile(p);
+      }
+    }
+    return res.status(404).send('sql-wasm.wasm not found');
   });
 
   // Serve static UI bundle if dist exists

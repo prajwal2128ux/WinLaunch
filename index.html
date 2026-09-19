@@ -9,6 +9,40 @@
     <meta property="og:description" content="Modern Windows desktop launcher and bookmark manager to save, organize, and launch websites in Google Chrome with local SQLite storage, custom backgrounds, and cross-device account synchronization." />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
+    <script>
+      (function() {
+        // Fix for browser sandboxes where window.fetch or Window.prototype.fetch has a getter without a setter
+        try {
+          var desc = Object.getOwnPropertyDescriptor(window, 'fetch') ||
+                     Object.getOwnPropertyDescriptor(Window.prototype, 'fetch');
+          if (desc && desc.get && !desc.set) {
+            var currentFetch = desc.get.call(window);
+            var safeDescriptor = {
+              get: function() { return currentFetch; },
+              set: function(newFetch) { currentFetch = newFetch; },
+              configurable: true,
+              enumerable: desc.enumerable !== undefined ? desc.enumerable : true
+            };
+            try {
+              Object.defineProperty(window, 'fetch', safeDescriptor);
+            } catch (e1) {
+              try {
+                Object.defineProperty(Window.prototype, 'fetch', safeDescriptor);
+              } catch (e2) {}
+            }
+          }
+        } catch (e) {}
+
+        // Global error boundary for benign environment setter collisions
+        window.addEventListener('error', function(event) {
+          if (event && event.message && event.message.indexOf('Cannot set property fetch') !== -1) {
+            if (typeof event.preventDefault === 'function') event.preventDefault();
+            if (typeof event.stopImmediatePropagation === 'function') event.stopImmediatePropagation();
+            return true;
+          }
+        }, true);
+      })();
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">

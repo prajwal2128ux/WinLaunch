@@ -1,5 +1,6 @@
 import initSqlJs, { Database } from 'sql.js';
 import { Website, Category, AppSettings } from '../types';
+import { getApiBaseUrl } from './apiConfig';
 
 const STORAGE_KEY_SQLITE_BINARY = 'winlaunch_sqlite_db_bin';
 const STORAGE_KEY_BACKUP_JSON = 'winlaunch_sqlite_backup_json';
@@ -177,33 +178,82 @@ class SQLiteDatabaseService {
       console.warn('Failed to parse saved settings:', e);
     }
 
-    // Try loading SQLite WebAssembly
-    try {
-      const SQL = await initSqlJs({
-        locateFile: (file) => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.12.0/${file}`
-      });
+    // Try loading SQLite WebAssembly with validated binary
+    let sqliteLoaded = false;
 
-      const savedDbBinary = localStorage.getItem(STORAGE_KEY_SQLITE_BINARY);
-      if (savedDbBinary) {
+    if (typeof WebAssembly === 'object' && typeof WebAssembly.instantiate === 'function') {
+      try {
+        let wasmBinary: ArrayBuffer | null = null;
+
+        // 1. Attempt to fetch local wasm binary from server or relative path
         try {
-          const binaryArray = Uint8Array.from(atob(savedDbBinary), (c) => c.charCodeAt(0));
-          this.db = new SQL.Database(binaryArray);
-        } catch (e) {
-          console.warn('Error reading saved SQLite binary, creating fresh DB:', e);
-          this.db = new SQL.Database();
-        }
-      } else {
-        this.db = new SQL.Database();
-      }
+          const baseUrl = getApiBaseUrl();
+          const candidates: string[] = [];
+          if (baseUrl) {
+            candidates.push(`${baseUrl}/sql-wasm.wasm`);
+          }
+          candidates.push('/sql-wasm.wasm');
+          if (typeof window !== 'undefined' && (window as any).electronAPI?.apiUrl) {
+            candidates.unshift(`${(window as any).electronAPI.apiUrl}/sql-wasm.wasm`);
+          }
 
-      this.createTables();
-      this.syncMemoryFromDb();
-      this.isInitialized = true;
-    } catch (err) {
-      console.warn('SQLite WASM init error (fallback to local JSON store):', err);
-      this.initFallbackStorage();
-      this.isInitialized = true;
+          for (const url of candidates) {
+            try {
+              const res = await fetch(url);
+              if (res.ok) {
+                const buffer = await res.arrayBuffer();
+                // Check WebAssembly magic number: 0x00 0x61 0x73 0x6d ('\0asm')
+                if (buffer.byteLength > 8) {
+                  const magic = new Uint8Array(buffer, 0, 4);
+                  if (magic[0] === 0x00 && magic[1] === 0x61 && magic[2] === 0x73 && magic[3] === 0x6d) {
+                    wasmBinary = buffer;
+                    break;
+                  }
+                }
+              }
+            } catch {
+              // try next candidate
+            }
+          }
+        } catch {
+          // fetch attempt failed
+        }
+
+        // Only call initSqlJs if we verified a valid wasmBinary
+        // This ensures sql.js NEVER attempts its own remote fetch or aborts with WebAssembly.RuntimeError
+        if (wasmBinary) {
+          const SQL = await initSqlJs({
+            wasmBinary: wasmBinary,
+            locateFile: () => '/sql-wasm.wasm'
+          });
+
+          const savedDbBinary = localStorage.getItem(STORAGE_KEY_SQLITE_BINARY);
+          if (savedDbBinary) {
+            try {
+              const binaryArray = Uint8Array.from(atob(savedDbBinary), (c) => c.charCodeAt(0));
+              this.db = new SQL.Database(binaryArray);
+            } catch (e) {
+              console.warn('Error reading saved SQLite binary, creating fresh DB:', e);
+              this.db = new SQL.Database();
+            }
+          } else {
+            this.db = new SQL.Database();
+          }
+
+          this.createTables();
+          this.syncMemoryFromDb();
+          sqliteLoaded = true;
+        }
+      } catch (err) {
+        console.warn('SQLite initialization skipped, falling back to local store:', err);
+      }
     }
+
+    if (!sqliteLoaded) {
+      this.initFallbackStorage();
+    }
+
+    this.isInitialized = true;
   }
 
   private createTables(): void {
